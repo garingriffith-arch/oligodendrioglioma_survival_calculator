@@ -10,17 +10,21 @@ suppressPackageStartupMessages({
 # Oligodendroglioma Overall Survival Estimator
 # Shiny app for NCDB oligodendroglioma calculator
 #
-# Expected project structure:
-#   TBD calc/
-#   ├── data/
-#   │   └── processed/
-#   │       ├── oligodendroglioma_model_objects.rds
-#   │       └── oligodendroglioma_pipeline/
-#   │           ├── 01_outputs/03_final_model_dataset_split.rds
-#   │           └── 02_outputs/fit_final_training_cox.rds
-#   └── shiny/
-#       ├── app.R
-#       └── www/ohsu_logo.png
+# Expected GitHub/deployment project structure:
+#   app.R
+#   manifest.json
+#   www/
+#     ohsu_logo.png
+#   data/
+#     processed/
+#       oligodendroglioma_model_objects.rds
+#
+# Optional fallback structure if you commit pipeline outputs instead:
+#   data/
+#     processed/
+#       oligodendroglioma_pipeline/
+#         01_outputs/03_final_model_dataset_split.rds
+#         02_outputs/fit_final_training_cox.rds
 #
 # The preferred model object is:
 #   obj$cph_fit
@@ -33,9 +37,9 @@ suppressPackageStartupMessages({
 # ----------------------------
 # 1. Load model object
 # ----------------------------
-model_object_path <- file.path("..", "data", "processed", "oligodendroglioma_model_objects.rds")
-fit_fallback_path <- file.path("..", "data", "processed", "oligodendroglioma_pipeline", "02_outputs", "fit_final_training_cox.rds")
-df_fallback_path  <- file.path("..", "data", "processed", "oligodendroglioma_pipeline", "01_outputs", "03_final_model_dataset_split.rds")
+model_object_path <- file.path("data", "processed", "oligodendroglioma_model_objects.rds")
+fit_fallback_path <- file.path("data", "processed", "oligodendroglioma_pipeline", "02_outputs", "fit_final_training_cox.rds")
+df_fallback_path  <- file.path("data", "processed", "oligodendroglioma_pipeline", "01_outputs", "03_final_model_dataset_split.rds")
 
 if (file.exists(model_object_path)) {
   obj <- readRDS(model_object_path)
@@ -53,7 +57,7 @@ if (file.exists(model_object_path)) {
       "or\n",
       "2) ", normalizePath(fit_fallback_path, winslash = "/", mustWork = FALSE), "\n",
       "   ", normalizePath(df_fallback_path, winslash = "/", mustWork = FALSE), "\n\n",
-      "Make sure the app folder is inside the project folder and that the data/processed folder is one level above shiny/."
+      "Make sure data/processed/ is inside the same folder as app.R."
     ),
     call. = FALSE
   )
