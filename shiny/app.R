@@ -12,193 +12,58 @@ suppressPackageStartupMessages({
 # The visual design intentionally mirrors the current OHSU GBM
 # calculator; only disease/model-specific content is changed.
 #
-# Preferred deployment structure:
-#   shiny/
-#   ├── app.R
-#   ├── data/
-#   │   └── processed/
-#   │       ├── oligodendroglioma_model_objects.rds
-#   │       ├── oligo_deployment_coefficients.csv        # fallback
-#   │       └── oligo_deployment_baseline_survival_full_curve.csv # fallback
-#   └── www/
-#       └── ohsu_logo.png
+# Deployment note:
+# - The final Stage 5 deployment coefficients and reference
+#   baseline survivals at 12, 24, and 36 months are embedded
+#   directly below.
+# - No external .rds or model CSV is required for the app to run.
+# - This avoids deployment failures caused by omitted model files.
 # ============================================================
 
 # ----------------------------
-# 1. Load final deployment model
+# 1. Frozen final deployment model
 # ----------------------------
 MODEL_VERSION <- "oligo_landmark_stage5_2026-09-07"
 
-model_object_candidates <- c(
-  file.path("data", "processed", "oligodendroglioma_model_objects.rds"),
-  "oligodendroglioma_model_objects.rds",
-  file.path("..", "data", "processed", "oligodendroglioma_model_objects.rds")
+horizons <- c(12L, 24L, 36L)
+model_n <- 5064L
+model_deaths <- 487L
+shrinkage_factor <- 0.9760689638084762
+
+# Uniformly shrunken Stage 5 deployment coefficients.
+BETA <- c(
+  age = 0.05095601523983125,
+  grade3 = 0.6024565026135468,
+  tumor_size_mm = 0.002646459974816687,
+  cdcc1 = 0.24724068144979028,
+  cdcc2plus = 0.5127431011630753,
+  str_partial = -0.2693157192625999,
+  gtr = -0.4122570643722357,
+  male = 0.1671893429159114
 )
 
-model_object_path <- model_object_candidates[file.exists(model_object_candidates)][1]
-
-obj <- NULL
-model_source <- NULL
-
-if (!is.na(model_object_path)) {
-  obj_try <- tryCatch(readRDS(model_object_path), error = function(e) NULL)
-
-  if (!is.null(obj_try) &&
-      identical(obj_try$model_version, MODEL_VERSION) &&
-      !is.null(obj_try$deployment_coefficients) &&
-      !is.null(obj_try$baseline_curve)) {
-    obj <- obj_try
-    model_source <- "rds"
-  }
-}
-
-# Safe fallback to the exact frozen Stage 5 deployment CSVs.
-# This allows deployment before the optional consolidated RDS is built.
-if (is.null(obj)) {
-  coeff_candidates <- c(
-    file.path("data", "processed", "oligo_deployment_coefficients.csv"),
-    file.path("model", "oligo_deployment_coefficients.csv"),
-    "oligo_deployment_coefficients.csv"
-  )
-  baseline_candidates <- c(
-    file.path("data", "processed", "oligo_deployment_baseline_survival_full_curve.csv"),
-    file.path("model", "oligo_deployment_baseline_survival_full_curve.csv"),
-    "oligo_deployment_baseline_survival_full_curve.csv"
-  )
-
-  coeff_path <- coeff_candidates[file.exists(coeff_candidates)][1]
-  baseline_path <- baseline_candidates[file.exists(baseline_candidates)][1]
-
-  if (is.na(coeff_path) || is.na(baseline_path)) {
-    stop(
-      paste0(
-        "Could not find the final oligodendroglioma deployment model.\n\n",
-        "Preferred file:\n",
-        "  data/processed/oligodendroglioma_model_objects.rds\n\n",
-        "Alternatively provide both frozen Stage 5 CSV files:\n",
-        "  data/processed/oligo_deployment_coefficients.csv\n",
-        "  data/processed/oligo_deployment_baseline_survival_full_curve.csv"
-      ),
-      call. = FALSE
-    )
-  }
-
-  obj <- list(
-    model_version = MODEL_VERSION,
-    deployment_coefficients = read.csv(coeff_path, stringsAsFactors = FALSE, check.names = FALSE),
-    baseline_curve = read.csv(baseline_path, stringsAsFactors = FALSE, check.names = FALSE),
-    horizons = c(12L, 24L, 36L),
-    model_n = 5064L,
-    model_deaths = 487L,
-    uniform_shrinkage_factor = 0.9760689638084762
-  )
-  model_source <- "csv"
-}
-
-`%||%` <- function(a, b) if (!is.null(a)) a else b
-
-coef_df <- as.data.frame(obj$deployment_coefficients)
-baseline_curve <- as.data.frame(obj$baseline_curve)
-horizons <- as.integer(obj$horizons %||% c(12L, 24L, 36L))
-horizons <- sort(unique(horizons[is.finite(horizons)]))
-
-required_coef_cols <- c("term", "deployment_beta")
-if (!all(required_coef_cols %in% names(coef_df))) {
-  stop("Deployment coefficient artifact is missing required columns: term and deployment_beta.", call. = FALSE)
-}
-
-required_baseline_cols <- c(
-  "time_months_after_landmark",
-  "cumulative_baseline_hazard_reference"
+# Reference baseline survival after re-estimation of the baseline
+# hazard with the shrunken linear predictor. Reference profile:
+# age 45, Grade 2, tumor size 50 mm, CDCC 0,
+# biopsy/local excision, female.
+BASELINE_SURVIVAL <- c(
+  `12` = 0.9811932057756714,
+  `24` = 0.9589375516251721,
+  `36` = 0.9363517030566854
 )
-if (!all(required_baseline_cols %in% names(baseline_curve))) {
-  stop(
-    "Baseline-survival artifact is missing required time/hazard columns.",
-    call. = FALSE
-  )
-}
-
-coef_df$deployment_beta <- suppressWarnings(as.numeric(coef_df$deployment_beta))
-coef_lookup <- stats::setNames(coef_df$deployment_beta, coef_df$term)
-
-required_terms <- c(
-  "age",
-  "molecular_gradeGrade 3",
-  "tumor_size_mm",
-  "cdcc1",
-  "cdcc2+",
-  "procedure_groupSubtotal/partial resection",
-  "procedure_groupGross-total resection",
-  "sexMale"
-)
-
-missing_terms <- setdiff(required_terms, names(coef_lookup))
-if (length(missing_terms) > 0) {
-  stop(
-    paste0(
-      "Deployment coefficient artifact is missing required terms: ",
-      paste(missing_terms, collapse = ", ")
-    ),
-    call. = FALSE
-  )
-}
-
-baseline_curve$time_months_after_landmark <- suppressWarnings(
-  as.numeric(baseline_curve$time_months_after_landmark)
-)
-baseline_curve$cumulative_baseline_hazard_reference <- suppressWarnings(
-  as.numeric(baseline_curve$cumulative_baseline_hazard_reference)
-)
-
-baseline_curve <- baseline_curve[
-  is.finite(baseline_curve$time_months_after_landmark) &
-    is.finite(baseline_curve$cumulative_baseline_hazard_reference),
-  ,
-  drop = FALSE
-]
-baseline_curve <- baseline_curve[
-  order(baseline_curve$time_months_after_landmark),
-  ,
-  drop = FALSE
-]
-
-if (nrow(baseline_curve) == 0) {
-  stop("Baseline-survival artifact contains no usable rows.", call. = FALSE)
-}
-
-# Guarantee an explicit time-zero baseline.
-if (baseline_curve$time_months_after_landmark[1] > 0) {
-  baseline_curve <- rbind(
-    data.frame(
-      time_months_after_landmark = 0,
-      cumulative_baseline_hazard_reference = 0
-    ),
-    baseline_curve[, required_baseline_cols, drop = FALSE]
-  )
-}
-
-if (!identical(horizons, c(12L, 24L, 36L))) {
-  stop(
-    paste0(
-      "The oligodendroglioma deployment model must use 12-, 24-, and 36-month horizons after the landmark. Found: ",
-      paste(horizons, collapse = ", "), "."
-    ),
-    call. = FALSE
-  )
-}
-
-model_n <- as.integer(obj$model_n %||% 5064L)
-model_deaths <- as.integer(obj$model_deaths %||% 487L)
-shrinkage_factor <- as.numeric(obj$uniform_shrinkage_factor %||% 0.9760689638084762)
 
 # Frozen internal-validation values from the final analysis.
 corrected_c <- 0.7289661234802536
-corrected_auc <- c(`12` = 0.7338511997892629,
-                   `24` = 0.7455903899504883,
-                   `36` = 0.7415886914652117)
-corrected_brier <- c(`12` = 0.02508667534348479,
-                     `24` = 0.05002006728228309,
-                     `36` = 0.07273857614532989)
+corrected_auc <- c(
+  `12` = 0.7338511997892629,
+  `24` = 0.7455903899504883,
+  `36` = 0.7415886914652117
+)
+corrected_brier <- c(
+  `12` = 0.02508667534348479,
+  `24` = 0.05002006728228309,
+  `36` = 0.07273857614532989
+)
 pre_shrinkage_corrected_slope <- 0.9760689638084762
 
 # ----------------------------
@@ -214,32 +79,36 @@ fmt_pct <- function(x) {
   ifelse(is.na(x), "—", sprintf("%.1f%%", 100 * x))
 }
 
-baseline_hazard_at <- function(times) {
-  times <- as.numeric(times)
-  idx <- findInterval(times, baseline_curve$time_months_after_landmark)
-  out <- numeric(length(times))
-  use <- idx > 0
-  out[use] <- baseline_curve$cumulative_baseline_hazard_reference[idx[use]]
-  out
-}
-
 linear_predictor <- function(age, molecular_grade, tumor_size_mm, cdcc, procedure, sex) {
   as.numeric(
-    coef_lookup[["age"]] * (age - 45) +
-      coef_lookup[["molecular_gradeGrade 3"]] * as.numeric(molecular_grade == "Grade 3") +
-      coef_lookup[["tumor_size_mm"]] * (tumor_size_mm - 50) +
-      coef_lookup[["cdcc1"]] * as.numeric(cdcc == "1") +
-      coef_lookup[["cdcc2+"]] * as.numeric(cdcc == "2+") +
-      coef_lookup[["procedure_groupSubtotal/partial resection"]] * as.numeric(procedure == "Subtotal/partial resection") +
-      coef_lookup[["procedure_groupGross-total resection"]] * as.numeric(procedure == "Gross-total resection") +
-      coef_lookup[["sexMale"]] * as.numeric(sex == "Male")
+    BETA[["age"]] * (age - 45) +
+      BETA[["grade3"]] * as.numeric(molecular_grade == "Grade 3") +
+      BETA[["tumor_size_mm"]] * (tumor_size_mm - 50) +
+      BETA[["cdcc1"]] * as.numeric(cdcc == "1") +
+      BETA[["cdcc2plus"]] * as.numeric(cdcc == "2+") +
+      BETA[["str_partial"]] * as.numeric(procedure == "Subtotal/partial resection") +
+      BETA[["gtr"]] * as.numeric(procedure == "Gross-total resection") +
+      BETA[["male"]] * as.numeric(sex == "Male")
   )
 }
 
 predict_survival_at <- function(age, molecular_grade, tumor_size_mm, cdcc, procedure, sex, times) {
-  lp <- linear_predictor(age, molecular_grade, tumor_size_mm, cdcc, procedure, sex)
-  h0 <- baseline_hazard_at(times)
-  surv <- exp(-h0 * exp(lp))
+  times <- suppressWarnings(as.integer(times))
+  if (any(!times %in% horizons)) {
+    stop("Predictions are available only at 12, 24, and 36 months after the landmark.", call. = FALSE)
+  }
+
+  lp <- linear_predictor(
+    age = age,
+    molecular_grade = molecular_grade,
+    tumor_size_mm = tumor_size_mm,
+    cdcc = cdcc,
+    procedure = procedure,
+    sex = sex
+  )
+
+  s0 <- unname(BASELINE_SURVIVAL[as.character(times)])
+  surv <- s0 ^ exp(lp)
   pmin(pmax(as.numeric(surv), 0), 1)
 }
 
@@ -269,15 +138,8 @@ logo_ui <- if (file.exists(file.path("www", "ohsu_logo.png"))) {
   div("OHSU", class = "ohsu-logo-fallback")
 }
 
-model_status_ui <- if (!identical(obj$model_version, MODEL_VERSION)) {
-  div(
-    class = "model-warning",
-    tags$strong("Model-object update required. "),
-    "The loaded oligodendroglioma model artifact does not match the final landmark deployment model."
-  )
-} else {
-  NULL
-}
+model_status_ui <- NULL
+
 
 # ----------------------------
 # 4. UI
@@ -429,7 +291,7 @@ ui <- page_fluid(
         card(
           class = "plot-card",
           card_body(
-            h2("Estimated overall survival after the 180-day landmark", class = "plot-title"),
+            h2("Estimated fixed-horizon overall survival after the 180-day landmark", class = "plot-title"),
             plotOutput("survplot", height = "560px")
           )
         )
@@ -472,7 +334,7 @@ ui <- page_fluid(
           div(
             h3("Internal validation"),
             tags$ul(
-              tags$li("The final Cox model used the full development cohort with 20 multiply imputed datasets and bootstrap internal validation."),
+              tags$li("The final Cox model used the full development cohort with 20 multiply imputed datasets and bootstrap internal validation; the deployed calculator uses the uniformly shrunken final coefficients and re-estimated reference baseline survival."),
               tags$li(paste0("Optimism-corrected Harrell C was ", sprintf("%.3f", corrected_c), ".")),
               tags$li(
                 paste0(
@@ -564,18 +426,11 @@ server <- function(input, output, session) {
   }, ignoreNULL = FALSE)
 
   curve_data <- eventReactive(input$calc, {
-    p <- patient_values()
-    time_grid <- seq(0, 36, by = 0.25)
-    surv <- predict_survival_at(
-      age = p$age,
-      molecular_grade = p$molecular_grade,
-      tumor_size_mm = p$tumor_size_mm,
-      cdcc = p$cdcc,
-      procedure = p$procedure,
-      sex = p$sex,
-      times = time_grid
+    h <- horizon_data()
+    data.frame(
+      month = c(0L, h$horizon_months),
+      survival = c(1, h$survival)
     )
-    data.frame(month = time_grid, survival = surv)
   }, ignoreNULL = FALSE)
 
   lapply(horizons, function(h) {
