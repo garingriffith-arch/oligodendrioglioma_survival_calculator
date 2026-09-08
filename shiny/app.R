@@ -9,8 +9,8 @@
 # - Re-estimated pooled baseline hazard from Stage 5
 #
 # REQUIRED:
-# - Place logo at: www/ohsu_logo.png
-# - Place deployment artifacts in: model/
+# - Place logo at: shiny/www/ohsu_logo.png
+# - Place final deployment CSVs in: model/
 # ------------------------------------------------------------
 
 suppressPackageStartupMessages({
@@ -24,23 +24,23 @@ suppressPackageStartupMessages({
 # -----------------------------
 find_project_root <- function() {
   wd <- normalizePath(getwd(), winslash = "/", mustWork = FALSE)
-  
+
   candidates <- c(
     file.path(wd, "model"),
     file.path(wd, "..", "model")
   )
-  
+
   if (any(dir.exists(candidates))) {
     if (dir.exists(file.path(wd, "model"))) return(wd)
     if (dir.exists(file.path(wd, "..", "model"))) return(normalizePath(file.path(wd, "..")))
   }
-  
+
   cur <- wd
   for (i in 1:6) {
     cur <- dirname(cur)
     if (dir.exists(file.path(cur, "model"))) return(cur)
   }
-  
+
   stop("Could not locate project root containing a model/ directory from working directory: ", wd)
 }
 
@@ -62,27 +62,33 @@ COEF_PATHS <- c(
 baseline_path <- BASELINE_PATHS[file.exists(BASELINE_PATHS)][1]
 coef_path <- COEF_PATHS[file.exists(COEF_PATHS)][1]
 
-if (is.na(baseline_path) || !file.exists(baseline_path)) {
-  stop(
-    "No baseline-survival deployment file found. Expected one of:\n",
-    paste(BASELINE_PATHS, collapse = "\n")
-  )
+if (length(baseline_path) == 0L || is.na(baseline_path) || !file.exists(baseline_path)) {
+  stop("No oligodendroglioma baseline-survival deployment file found. Expected one of:\n",
+       paste(BASELINE_PATHS, collapse = "\n"))
 }
 
-if (is.na(coef_path) || !file.exists(coef_path)) {
-  stop(
-    "No deployment-coefficient file found. Expected one of:\n",
-    paste(COEF_PATHS, collapse = "\n")
-  )
+if (length(coef_path) == 0L || is.na(coef_path) || !file.exists(coef_path)) {
+  stop("No oligodendroglioma deployment-coefficient file found. Expected one of:\n",
+       paste(COEF_PATHS, collapse = "\n"))
 }
 
-baseline_curve <- read.csv(baseline_path, check.names = FALSE)
-coef_tbl <- read.csv(coef_path, check.names = FALSE)
+baseline_curve <- utils::read.csv(
+  baseline_path,
+  check.names = FALSE,
+  stringsAsFactors = FALSE
+)
+
+coef_tbl <- utils::read.csv(
+  coef_path,
+  check.names = FALSE,
+  stringsAsFactors = FALSE
+)
 
 required_baseline_cols <- c(
   "time_months_after_landmark",
   "cumulative_baseline_hazard_reference"
 )
+
 if (!all(required_baseline_cols %in% names(baseline_curve))) {
   stop(
     "Baseline deployment file is missing required columns: ",
@@ -91,11 +97,35 @@ if (!all(required_baseline_cols %in% names(baseline_curve))) {
 }
 
 required_coef_cols <- c("term", "deployment_beta")
+
 if (!all(required_coef_cols %in% names(coef_tbl))) {
   stop(
     "Coefficient deployment file is missing required columns: ",
     paste(setdiff(required_coef_cols, names(coef_tbl)), collapse = ", ")
   )
+}
+
+baseline_curve$time_months_after_landmark <- suppressWarnings(
+  as.numeric(baseline_curve$time_months_after_landmark)
+)
+baseline_curve$cumulative_baseline_hazard_reference <- suppressWarnings(
+  as.numeric(baseline_curve$cumulative_baseline_hazard_reference)
+)
+coef_tbl$deployment_beta <- suppressWarnings(as.numeric(coef_tbl$deployment_beta))
+
+if (any(!is.finite(baseline_curve$time_months_after_landmark)) ||
+    any(!is.finite(baseline_curve$cumulative_baseline_hazard_reference))) {
+  stop("Baseline deployment file contains non-finite time or hazard values.")
+}
+
+baseline_curve <- baseline_curve[
+  order(baseline_curve$time_months_after_landmark),
+  ,
+  drop = FALSE
+]
+
+if (max(baseline_curve$time_months_after_landmark) < 36) {
+  stop("Baseline deployment curve does not extend through 36 months after the landmark.")
 }
 
 get_deployment_beta <- function(term_name) {
@@ -106,10 +136,11 @@ get_deployment_beta <- function(term_name) {
   as.numeric(x)
 }
 
-OLIGO_REFERENCE_AGE <- 45
-OLIGO_REFERENCE_SIZE_MM <- 50
+# The Stage 5 deployment model was centered at age 45 years and tumor size 50 mm.
+REFERENCE_AGE <- 45
+REFERENCE_SIZE_MM <- 50
 
-OLIGO_BETA <- c(
+BETA <- c(
   age = get_deployment_beta("age"),
   grade3 = get_deployment_beta("molecular_gradeGrade 3"),
   tumor_size_mm = get_deployment_beta("tumor_size_mm"),
@@ -120,66 +151,90 @@ OLIGO_BETA <- c(
   male = get_deployment_beta("sexMale")
 )
 
+if (any(!is.finite(BETA))) {
+  stop("One or more oligodendroglioma deployment coefficients are non-finite.")
+}
+
 # -----------------------------
 # Final Stage 5 prediction function
 # -----------------------------
-oligo_predict <- function(
+predict_oligo_survival <- function(
     age,
-    molecular_grade,
+    grade,
     tumor_size_mm,
     cdcc,
-    procedure_group,
+    procedure,
     sex,
     horizons = c(12, 24, 36)
 ) {
-  age <- as.numeric(age)
-  tumor_size_mm <- as.numeric(tumor_size_mm)
-  horizons <- as.numeric(horizons)
-  
-  if (length(age) != 1L || !is.finite(age)) stop("Age must be a finite numeric value.")
-  if (length(tumor_size_mm) != 1L || !is.finite(tumor_size_mm)) stop("Tumor size must be a finite numeric value.")
-  if (any(!is.finite(horizons)) || any(horizons < 0)) stop("Invalid prediction horizon.")
-  
-  molecular_grade <- match.arg(as.character(molecular_grade), c("Grade 2", "Grade 3"))
+  age <- suppressWarnings(as.numeric(age))
+  tumor_size_mm <- suppressWarnings(as.numeric(tumor_size_mm))
+  horizons <- suppressWarnings(as.numeric(horizons))
+
+  if (length(age) != 1L || !is.finite(age)) {
+    stop("Age must be a finite numeric value.")
+  }
+  if (age < 18 || age > 100) {
+    stop("Age must be between 18 and 100 years.")
+  }
+  if (length(tumor_size_mm) != 1L || !is.finite(tumor_size_mm)) {
+    stop("Tumor size must be a finite numeric value.")
+  }
+  if (tumor_size_mm <= 0 || tumor_size_mm > 300) {
+    stop("Tumor size must be greater than 0 and no more than 300 mm.")
+  }
+  if (any(!is.finite(horizons)) || any(horizons < 0)) {
+    stop("Invalid prediction horizon.")
+  }
+
+  grade <- match.arg(as.character(grade), c("Grade 2", "Grade 3"))
   cdcc <- match.arg(as.character(cdcc), c("0", "1", "2+"))
-  procedure_group <- match.arg(
-    as.character(procedure_group),
+  procedure <- match.arg(
+    as.character(procedure),
     c("Biopsy/local excision", "Subtotal/partial resection", "Gross-total resection")
   )
   sex <- match.arg(as.character(sex), c("Female", "Male"))
-  
-  lp <- OLIGO_BETA[["age"]] * (age - OLIGO_REFERENCE_AGE) +
-    OLIGO_BETA[["grade3"]] * as.numeric(molecular_grade == "Grade 3") +
-    OLIGO_BETA[["tumor_size_mm"]] * (tumor_size_mm - OLIGO_REFERENCE_SIZE_MM) +
-    OLIGO_BETA[["cdcc1"]] * as.numeric(cdcc == "1") +
-    OLIGO_BETA[["cdcc2plus"]] * as.numeric(cdcc == "2+") +
-    OLIGO_BETA[["str_partial"]] * as.numeric(procedure_group == "Subtotal/partial resection") +
-    OLIGO_BETA[["gtr"]] * as.numeric(procedure_group == "Gross-total resection") +
-    OLIGO_BETA[["male"]] * as.numeric(sex == "Male")
-  
+
+  lp <- BETA[["age"]] * (age - REFERENCE_AGE) +
+    BETA[["grade3"]] * as.numeric(grade == "Grade 3") +
+    BETA[["tumor_size_mm"]] * (tumor_size_mm - REFERENCE_SIZE_MM) +
+    BETA[["cdcc1"]] * as.numeric(cdcc == "1") +
+    BETA[["cdcc2plus"]] * as.numeric(cdcc == "2+") +
+    BETA[["str_partial"]] * as.numeric(procedure == "Subtotal/partial resection") +
+    BETA[["gtr"]] * as.numeric(procedure == "Gross-total resection") +
+    BETA[["male"]] * as.numeric(sex == "Male")
+
   H0 <- vapply(horizons, function(t) {
-    j <- findInterval(t, baseline_curve$time_months_after_landmark)
-    if (j == 0L) 0 else baseline_curve$cumulative_baseline_hazard_reference[[j]]
+    idx <- findInterval(t, baseline_curve$time_months_after_landmark)
+    if (idx == 0L) {
+      0
+    } else {
+      baseline_curve$cumulative_baseline_hazard_reference[[idx]]
+    }
   }, numeric(1))
-  
-  survival_probability <- exp(-H0 * exp(lp))
-  
+
+  surv <- exp(-H0 * exp(lp))
+
+  if (any(!is.finite(surv)) || any(surv < 0) || any(surv > 1)) {
+    stop("Prediction produced an invalid survival probability.")
+  }
+
   data.frame(
     horizon_months = horizons,
-    survival = survival_probability
+    survival = surv
   )
 }
 
 # -----------------------------
-# Build model inputs
+# Build newdata row matching the final model
 # -----------------------------
 make_newdata <- function(input) {
   list(
     age = as.numeric(input$age),
-    molecular_grade = input$grade,
+    grade = input$grade,
     tumor_size_mm = as.numeric(input$size),
     cdcc = input$cdcc,
-    procedure_group = input$procedure,
+    procedure = input$procedure,
     sex = input$sex
   )
 }
@@ -189,16 +244,21 @@ make_newdata <- function(input) {
 # -----------------------------
 predict_curve_0_36 <- function(newdata, t_max = 36, step = 0.25) {
   t_grid <- seq(0, t_max, by = step)
-  p <- oligo_predict(
+
+  p <- predict_oligo_survival(
     age = newdata$age,
-    molecular_grade = newdata$molecular_grade,
+    grade = newdata$grade,
     tumor_size_mm = newdata$tumor_size_mm,
     cdcc = newdata$cdcc,
-    procedure_group = newdata$procedure_group,
+    procedure = newdata$procedure,
     sex = newdata$sex,
     horizons = t_grid
   )
-  data.frame(Month = p$horizon_months, Survival = p$survival)
+
+  data.frame(
+    Month = p$horizon_months,
+    Survival = p$survival
+  )
 }
 
 # -----------------------------
@@ -223,7 +283,7 @@ ui <- fluidPage(
     base_font = font_google("Roboto"),
     heading_font = font_google("Roboto")
   ),
-  
+
   # Header: logo + left-aligned text block right next to it
   fluidRow(
     style = "
@@ -251,51 +311,51 @@ ui <- fluidPage(
       )
     )
   ),
-  
+
   tags$div(style = "height: 10px;"),
-  
+
   sidebarLayout(
     sidebarPanel(
       numericInput("age", "Age (years)", value = 45, min = 18, max = 100),
-      
+
       selectInput("sex", "Sex", choices = sex_levels, selected = sex_levels[1]),
       selectInput("grade", "Molecular grade", choices = grade_levels, selected = grade_levels[1]),
       selectInput("cdcc", "Charlson–Deyo comorbidity", choices = cdcc_levels, selected = cdcc_levels[1]),
       numericInput("size", "Tumor size (mm)", value = 50, min = 1, max = 300, step = 1),
-      
+
       tags$hr(),
-      
+
       selectInput(
         "procedure",
         "Index tissue procedure",
         choices = procedure_levels,
         selected = procedure_levels[1]
       ),
-      
+
       tags$hr(),
-      
+
       actionButton("calc", "Calculate", class = "btn-primary"),
       br(), br(),
       downloadButton("download_pred", "Download 12/24/36 predictions (CSV)")
     ),
-    
+
     mainPanel(
       tags$h4("Predicted overall survival probabilities"),
       tableOutput("pred_table"),
       br(),
-      
+
       tags$h4("Predicted survival curve (0–36 months after landmark)"),
       plotOutput("surv_plot", height = "320px"),
       br(),
-      
+
       tags$h4("Disclaimer"),
       tags$p(
         paste0(
-          "This tool estimates conditional overall survival for adults with molecularly defined oligodendroglioma (IDH-mutant, 1p/19q-codeleted) who remain alive 180 days after their index tissue procedure. ",
-          "Predictions are measured from that 180-day landmark and are based on National Cancer Database cases diagnosed from 2018 through 2023. ",
-          "The model uses age, molecular grade, tumor size, Charlson–Deyo comorbidity, index tissue procedure, and sex. ",
-          "It is prognostic and should not be interpreted as estimating the causal benefit of surgery, radiation, chemotherapy, or other treatment. ",
-          "The model has undergone internal validation but not independent external validation, and the development cohort predates routine vorasidenib use. ",
+          "This tool estimates conditional overall survival for adults with molecularly defined oligodendroglioma (IDH-mutant and 1p/19q-codeleted) who remain alive 180 days after their index tissue procedure. ",
+          "The 12-, 24-, and 36-month predictions are measured from that 180-day landmark, not from diagnosis or surgery. ",
+          "Predictions are based on National Cancer Database cases diagnosed from 2018 through 2023 and use age, sex, molecular grade, tumor size, Charlson–Deyo comorbidity, and index tissue procedure. ",
+          "The model is prognostic and should not be interpreted as estimating the causal benefit of biopsy, resection, radiation, chemotherapy, or other therapy. ",
+          "It has undergone internal validation but has not yet undergone independent external validation, and the development cohort predates routine use of vorasidenib. ",
           "This tool is intended to support research and clinical discussion and is not a substitute for individualized clinical judgment."
         )
       )
@@ -307,51 +367,86 @@ ui <- fluidPage(
 # Server
 # -----------------------------
 server <- function(input, output, session) {
-  
+
   pred_store <- reactiveVal(NULL)
-  
+  curve_store <- reactiveVal(NULL)
+
   observeEvent(input$calc, {
-    
-    nd <- make_newdata(input)
-    
-    pred_tbl <- oligo_predict(
-      age = nd$age,
-      molecular_grade = nd$molecular_grade,
-      tumor_size_mm = nd$tumor_size_mm,
-      cdcc = nd$cdcc,
-      procedure_group = nd$procedure_group,
-      sex = nd$sex,
-      horizons = c(12, 24, 36)
-    ) |>
-      dplyr::transmute(
-        Horizon_months_after_landmark = horizon_months,
-        Survival_probability = round(survival, 3)
+    tryCatch({
+      nd <- make_newdata(input)
+
+      pred_raw <- predict_oligo_survival(
+        age = nd$age,
+        grade = nd$grade,
+        tumor_size_mm = nd$tumor_size_mm,
+        cdcc = nd$cdcc,
+        procedure = nd$procedure,
+        sex = nd$sex,
+        horizons = c(12, 24, 36)
       )
-    
-    pred_store(pred_tbl)
-    
-    output$pred_table <- renderTable(pred_tbl, striped = TRUE, spacing = "s", digits = 3)
-    
-    curve_df <- predict_curve_0_36(nd, t_max = 36, step = 0.25)
-    
-    output$surv_plot <- renderPlot({
-      plot(curve_df$Month, curve_df$Survival,
-           type = "l", lwd = 2, col = "#2C7FB8",
-           xlab = "Months after 180-day landmark", ylab = "Survival probability",
-           ylim = c(0, 1), xlim = c(0, 36))
-      grid()
-      abline(v = c(12, 24, 36), lty = 3, col = "gray50")
-      points(pred_tbl$Horizon_months_after_landmark, pred_tbl$Survival_probability, pch = 16, col = "#D95F02")
-      legend("topright",
-             legend = c("Predicted survival", "12/24/36 mo points"),
-             lty = c(1, NA), pch = c(NA, 16),
-             col = c("#2C7FB8", "#D95F02"),
-             bty = "n")
+
+      pred_tbl <- data.frame(
+        Horizon_months_after_landmark = pred_raw$horizon_months,
+        Survival_probability = round(pred_raw$survival, 3)
+      )
+
+      curve_df <- predict_curve_0_36(nd, t_max = 36, step = 0.25)
+
+      pred_store(pred_tbl)
+      curve_store(curve_df)
+
+      output$pred_table <- renderTable(
+        pred_tbl,
+        striped = TRUE,
+        spacing = "s",
+        digits = 3
+      )
+
+      output$surv_plot <- renderPlot({
+        plot(
+          curve_df$Month,
+          curve_df$Survival,
+          type = "l",
+          lwd = 2,
+          col = "#2C7FB8",
+          xlab = "Months after 180-day landmark",
+          ylab = "Survival probability",
+          ylim = c(0, 1),
+          xlim = c(0, 36)
+        )
+        grid()
+        abline(v = c(12, 24, 36), lty = 3, col = "gray50")
+        points(
+          pred_tbl$Horizon_months_after_landmark,
+          pred_tbl$Survival_probability,
+          pch = 16,
+          col = "#D95F02"
+        )
+        legend(
+          "topright",
+          legend = c("Predicted survival", "12/24/36 mo points"),
+          lty = c(1, NA),
+          pch = c(NA, 16),
+          col = c("#2C7FB8", "#D95F02"),
+          bty = "n"
+        )
+      })
+
+    }, error = function(e) {
+      pred_store(NULL)
+      curve_store(NULL)
+      showNotification(
+        paste0("Prediction error: ", conditionMessage(e)),
+        type = "error",
+        duration = NULL
+      )
     })
   })
-  
+
   output$download_pred <- downloadHandler(
-    filename = function() paste0("oligodendroglioma_predictions_12_24_36_", Sys.Date(), ".csv"),
+    filename = function() {
+      paste0("oligodendroglioma_predictions_12_24_36_", Sys.Date(), ".csv")
+    },
     content = function(file) {
       pred <- pred_store()
       if (is.null(pred)) {
