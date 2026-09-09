@@ -1,6 +1,6 @@
 # Oligodendroglioma 180-day landmark prediction model: analysis code
 
-This directory contains the final R analysis code supporting the manuscript and deployed calculator.
+This directory contains cleaned, path-portable versions of the final R analysis code supporting the manuscript and deployed calculator.
 
 ## Scope
 
@@ -42,11 +42,11 @@ The expected molecular-cohort file is:
 - `00_OLIGO_LANDMARK_config_helpers.R` - configuration, registry harmonization, and performance helpers.
 - `04_OLIGO_TIMEVARYING_treatment_sensitivity.R` - naive versus time-varying treatment sensitivity.
 - `07_OLIGO_LANDMARK_stage3_final_specification.R` - predictor and functional-form checks.
-- `09_OLIGO_LANDMARK_stage3B_expanded_biopsy.R` - final biopsy coding, landmark cohort, and multiple imputation.
-- `08_OLIGO_LANDMARK_stage4_final_bootstrap.R` - final model fitting, PH diagnostics, and 20,000-fit bootstrap internal validation.
-- `10_OLIGO_LANDMARK_stage5_deployment_calibration.R` - shrinkage, calibration, baseline-hazard re-estimation, and deployment specification.
+- `09_OLIGO_LANDMARK_final_cohort_imputation.R` - final biopsy coding, landmark cohort, and multiple imputation.
+- `08_OLIGO_LANDMARK_final_model_validation.R` - final model fitting, PH diagnostics, and 20,000-fit bootstrap internal validation.
+- `10_OLIGO_LANDMARK_deployment_reference.R` - uniform shrinkage, baseline-hazard re-estimation, and reference prediction implementation.
 
-The exact numerical deployment implementation used by the web calculator is embedded in `shiny/app.R`.
+The exact numerical deployment implementation used by the web calculator is also embedded in `shiny/app.R`.
 
 ## Reproducibility note
 
